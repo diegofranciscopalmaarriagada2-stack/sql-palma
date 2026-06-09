@@ -1985,6 +1985,205 @@ function clearExercise(i) {
 }
 
 renderExercises();
+// ── VALIDACIÓN EN TIEMPO REAL ──
+const SQL_KEYWORDS = [
+  'SELECT','FROM','WHERE','INSERT','INTO','VALUES','UPDATE','SET',
+  'DELETE','CREATE','TABLE','DROP','ALTER','ADD','CONSTRAINT',
+  'PRIMARY','KEY','FOREIGN','REFERENCES','NOT','NULL','INT',
+  'VARCHAR','DATE','COMMIT','ROLLBACK','BETWEEN','AND','OR',
+  'IN','LIKE','TRUNCATE','CHAR','NUMBER','DECIMAL','UNIQUE',
+  'DEFAULT','ON','INDEX','DISTINCT','ORDER','BY','GROUP','HAVING',
+  'JOIN','INNER','LEFT','RIGHT','OUTER','AS','COUNT','SUM','AVG',
+  'MAX','MIN','UPPER','LOWER','LENGTH','TO_DATE','SYSDATE','DUAL'
+];
+
+const SQL_PATTERNS = [
+  // Estructura básica
+  /^\s*--.*$/m,                                          // comentarios OK
+  /\bSELECT\b.*\bFROM\b/i,                              // SELECT ... FROM
+  /\bINSERT\s+INTO\s+\w+/i,                             // INSERT INTO tabla
+  /\bVALUES\s*\(/i,                                     // VALUES (
+  /\bUPDATE\s+\w+\s+SET\b/i,                            // UPDATE tabla SET
+  /\bDELETE\s+FROM\s+\w+/i,                             // DELETE FROM tabla
+  /\bWHERE\s+\w+/i,                                     // WHERE col
+  /\bDATE\s*'[\d-]+'/i,                                 // DATE 'yyyy-mm-dd'
+  /\bIN\s*\(\s*[\d,\s]+\)/i,                            // IN (1,2,3)
+  /\bBETWEEN\b.*\bAND\b/i,                              // BETWEEN x AND y
+];
+
+// Palabras que son claramente errores tipográficos comunes
+const COMMON_TYPOS = [
+  [/\bSELCET\b/gi,'SELCET→SELECT'],
+  [/\bSELECT\b\s*\bFORM\b/gi,'FORM→FROM'],
+  [/\bINSERT\b\s+\bIN\b(?!TO)/gi,'INSERT IN→INSERT INTO'],
+  [/\bVALUE\s*\(/gi,'VALUE→VALUES'],
+  [/\bDELTE\b/gi,'DELTE→DELETE'],
+  [/\bUPDADE\b/gi,'UPDALE→UPDATE'],
+  [/\bWHEER\b/gi,'WHEER→WHERE'],
+  [/\bFROM\s+FORM\b/gi,'FORM→FROM'],
+  [/\bROLBACK\b/gi,'ROLBACK→ROLLBACK'],
+  [/\bCOMIT\b/gi,'COMIT→COMMIT'],
+  [/\bNULL\s*=\s*/gi,'NULL= (usa IS NULL)'],
+  [/\bDATE\s+"[\d-]+"/gi,'DATE con " → usa comilla simple \''],
+  [/\bDATE\s+[\d-]+[^']/gi,'DATE sin comillas → usa DATE \'yyyy-mm-dd\''],
+  [/\bIN\s*\([^)]*['"]\w+['"]/gi,'IN con strings en lugar de números'],
+];
+
+function validateSQL(code) {
+  const errors = [];
+  const lines = code.split('\n');
+
+  lines.forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('--')) return;
+
+    const lineNum = idx + 1;
+
+    // 1. Typos conocidos
+    COMMON_TYPOS.forEach(([regex, msg]) => {
+      if (regex.test(line)) {
+        errors.push({ line: lineNum, msg: `❌ Error tipográfico: ${msg}` });
+      }
+      regex.lastIndex = 0;
+    });
+
+    // 2. Palabras casi-keyword con un caracter de diferencia (distancia Levenshtein simple)
+    const words = line.replace(/[^a-zA-Z ]/g, ' ').split(/\s+/).filter(Boolean);
+    words.forEach(word => {
+      const up = word.toUpperCase();
+      if (up.length < 3) return;
+      if (SQL_KEYWORDS.includes(up)) return;
+      // Solo revisa palabras que parecen intentar ser keywords (mayúsculas o >4 chars)
+      if (word === word.toUpperCase() && word.length >= 4) {
+        const close = SQL_KEYWORDS.find(kw => levenshtein(up, kw) === 1);
+        if (close) {
+          errors.push({ line: lineNum, msg: `⚠️ "${word}" → ¿quisiste escribir ${close}?` });
+        }
+      }
+    });
+
+    // 3. Paréntesis sin cerrar
+    const opens = (line.match(/\(/g) || []).length;
+    const closes = (line.match(/\)/g) || []).length;
+    if (opens !== closes && !line.trim().endsWith(',')) {
+      errors.push({ line: lineNum, msg: `⚠️ Paréntesis desbalanceados en línea ${lineNum}` });
+    }
+
+    // 4. INSERT sin VALUES
+    if (/\bINSERT\s+INTO\b/i.test(line) && !/\bVALUES\b/i.test(line) && !line.trim().endsWith(',')) {
+      // Solo marca si la línea parece completa (tiene el cierre con ;)
+      if (line.includes(';')) {
+        errors.push({ line: lineNum, msg: `❌ INSERT INTO sin VALUES` });
+      }
+    }
+
+    // 5. UPDATE sin WHERE (advertencia suave)
+    if (/\bUPDATE\s+\w+\s+SET\b/i.test(line)) {
+      const fullBlock = lines.slice(idx, Math.min(idx + 4, lines.length)).join(' ');
+      if (!/\bWHERE\b/i.test(fullBlock) && fullBlock.includes(';')) {
+        errors.push({ line: lineNum, msg: `⚠️ UPDATE sin WHERE — afectará TODAS las filas` });
+      }
+    }
+
+    // 6. DELETE sin WHERE (advertencia)
+    if (/\bDELETE\s+FROM\b/i.test(line)) {
+      const fullBlock = lines.slice(idx, Math.min(idx + 4, lines.length)).join(' ');
+      if (!/\bWHERE\b/i.test(fullBlock) && fullBlock.includes(';')) {
+        errors.push({ line: lineNum, msg: `⚠️ DELETE sin WHERE — eliminará TODAS las filas` });
+      }
+    }
+
+    // 7. Strings sin cerrar
+    const singleQuotes = (line.match(/'/g) || []).length;
+    if (singleQuotes % 2 !== 0) {
+      errors.push({ line: lineNum, msg: `❌ String sin cerrar (comilla simple sin par)` });
+    }
+
+    // 8. Sentencia sin punto y coma al final (si no es continuación)
+    const isStatement = /^\s*(SELECT|INSERT|UPDATE|DELETE|COMMIT|ROLLBACK|DROP|CREATE|ALTER|TRUNCATE)\b/i.test(line);
+    const isContinuation = /,\s*$/.test(line) || /\bAND\b|\bOR\b|\bWHERE\b|\bSET\b|\bFROM\b/i.test(line);
+    if (isStatement && !isContinuation && !line.trim().endsWith(';') && trimmed.length > 5) {
+      errors.push({ line: lineNum, msg: `⚠️ Línea ${lineNum}: falta ";" al final` });
+    }
+  });
+
+  return errors;
+}
+
+// Levenshtein simplificado
+function levenshtein(a, b) {
+  if (Math.abs(a.length - b.length) > 2) return 99;
+  const dp = Array.from({length: a.length + 1}, (_, i) =>
+    Array.from({length: b.length + 1}, (_, j) => i === 0 ? j : j === 0 ? i : 0)
+  );
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++)
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+  return dp[a.length][b.length];
+}
+
+// Crear el panel de errores bajo cada textarea
+function injectErrorPanels() {
+  exercises.forEach((_, i) => {
+    const ta = document.getElementById(`ex-input-${i}`);
+    if (!ta) return;
+
+    // Panel de errores
+    const panel = document.createElement('div');
+    panel.id = `err-panel-${i}`;
+    panel.style.cssText = `
+      display:none;
+      background:#2a0a0f;
+      border:1px solid #f38ba8;
+      border-top:none;
+      border-radius:0 0 6px 6px;
+      padding:10px 14px;
+      font-family:'Fira Code',monospace;
+      font-size:12px;
+      color:#f38ba8;
+      line-height:1.8;
+      max-height:160px;
+      overflow-y:auto;
+    `;
+    ta.parentNode.insertBefore(panel, ta.nextSibling);
+
+    // Estilo del textarea en error
+    ta.addEventListener('input', () => {
+      const code = ta.value;
+      const errors = validateSQL(code);
+      const panel = document.getElementById(`err-panel-${i}`);
+
+      if (errors.length > 0 && code.trim().length > 0) {
+        panel.style.display = 'block';
+        panel.innerHTML = errors.map(e =>
+          `<div style="padding:2px 0;border-bottom:1px solid rgba(243,139,168,0.15)">
+            <span style="color:#585b70;font-size:11px">Línea ${e.line} &nbsp;</span>${e.msg}
+          </div>`
+        ).join('');
+        ta.style.borderColor = '#f38ba8';
+        ta.style.boxShadow = '0 0 0 2px rgba(243,139,168,0.25)';
+        ta.style.borderBottomLeftRadius = '0';
+        ta.style.borderBottomRightRadius = '0';
+      } else {
+        panel.style.display = 'none';
+        if (code.trim().length > 0) {
+          ta.style.borderColor = '#a6e3a1';
+          ta.style.boxShadow = '0 0 0 2px rgba(166,227,161,0.2)';
+        } else {
+          ta.style.borderColor = '';
+          ta.style.boxShadow = '';
+        }
+        ta.style.borderBottomLeftRadius = '';
+        ta.style.borderBottomRightRadius = '';
+      }
+    });
+  });
+}
+
+// Esperar a que renderExercises haya corrido
+setTimeout(injectErrorPanels, 100);
 </script>
 </body>
 </html>
