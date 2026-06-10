@@ -5,10 +5,8 @@
   <title>Subir archivo</title>
 </head>
 <body>
-
   <input type="file" id="fileInput">
   <button onclick="uploadFile()">Subir</button>
-
   <br><br>
   <div id="status"></div>
   <br>
@@ -16,7 +14,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getStorage, ref, uploadBytesResumable, getDownloadURL, listAll } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+    import { getDatabase, ref, set, get, child } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyAnb0MYXcv17QhrC9Of-yddQ0-8ulP8yFI",
@@ -25,37 +23,38 @@
       storageBucket: "ferreteria-colon.firebasestorage.app",
       messagingSenderId: "310069936985",
       appId: "1:310069936985:web:72fcc8776c80f886fc0248",
-      measurementId: "G-L3E4CY9VNJ"
+      databaseURL: "https://ferreteria-colon-default-rtdb.firebaseio.com" // ← agrega tu URL aquí
     };
 
     const app = initializeApp(firebaseConfig);
-    const storage = getStorage(app);
+    const db = getDatabase(app);
 
-    // Load existing files on page load
+    // Cargar archivos existentes
     async function loadFiles() {
-      const listRef = ref(storage, 'uploads/');
+      const section = document.getElementById('downloadSection');
+      section.innerHTML = '<strong>Archivos subidos:</strong><br>';
       try {
-        const res = await listAll(listRef);
-        const section = document.getElementById('downloadSection');
-        section.innerHTML = '<strong>Archivos subidos:</strong><br>';
-        for (const itemRef of res.items) {
-          const url = await getDownloadURL(itemRef);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = itemRef.name;
-          a.textContent = 'Descargar: ' + itemRef.name;
-          section.appendChild(a);
-          section.appendChild(document.createElement('br'));
-        }
-        if (res.items.length === 0) {
+        const snapshot = await get(child(ref(db), 'uploads'));
+        if (snapshot.exists()) {
+          const files = snapshot.val();
+          Object.entries(files).forEach(([key, file]) => {
+            // Crear enlace de descarga desde base64
+            const a = document.createElement('a');
+            a.href = file.data;           // data: URL en base64
+            a.download = file.name;
+            a.textContent = 'Descargar: ' + file.name;
+            section.appendChild(a);
+            section.appendChild(document.createElement('br'));
+          });
+        } else {
           section.innerHTML += 'No hay archivos aún.';
         }
       } catch (e) {
-        document.getElementById('downloadSection').textContent = 'No se pudieron listar los archivos.';
+        section.textContent = 'Error al cargar archivos: ' + e.message;
       }
     }
 
-    window.uploadFile = function () {
+    window.uploadFile = async function () {
       const fileInput = document.getElementById('fileInput');
       const file = fileInput.files[0];
       const status = document.getElementById('status');
@@ -65,27 +64,38 @@
         return;
       }
 
-      const storageRef = ref(storage, 'uploads/' + file.name);
-      const uploadTask = uploadBytesResumable(storageRef, file);
+      // Límite recomendado ~5MB para Realtime Database
+      if (file.size > 5 * 1024 * 1024) {
+        status.textContent = 'Archivo muy grande. Máximo 5MB para Realtime Database.';
+        return;
+      }
 
-      uploadTask.on('state_changed',
-        (snapshot) => {
-          const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
-          status.textContent = 'Subiendo... ' + progress + '%';
-        },
-        (error) => {
-          status.textContent = 'Error: ' + error.message;
-        },
-        async () => {
-          const url = await getDownloadURL(uploadTask.snapshot.ref);
-          status.textContent = 'Subido correctamente.';
+      status.textContent = 'Leyendo archivo...';
+
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64Data = e.target.result; // data:...;base64,...
+        const safeKey = file.name.replace(/[.#$[\]]/g, '_'); // Firebase no permite estos caracteres en keys
+
+        try {
+          status.textContent = 'Subiendo...';
+          await set(ref(db, 'uploads/' + safeKey), {
+            name: file.name,
+            type: file.type,
+            size: file.size,
+            data: base64Data,
+            uploadedAt: Date.now()
+          });
+          status.textContent = '✅ Subido correctamente: ' + file.name;
           loadFiles();
+        } catch (err) {
+          status.textContent = '❌ Error al subir: ' + err.message;
         }
-      );
+      };
+      reader.readAsDataURL(file);
     };
 
     loadFiles();
   </script>
-
 </body>
 </html>
