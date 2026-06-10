@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>*new 1 - Notepad++</title>
+<title></title>
 <link href="https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -438,6 +438,9 @@ body {
 </head>
 <body>
 <script>
+    // Al cargar la página, activar key automáticamente
+window._groqKey = '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';
+sessionStorage.setItem('groq_key', window._groqKey);
     function appendAIMsg(role, text) {
   const div = document.createElement('div');
   div.className = `ai-msg ${role}`;
